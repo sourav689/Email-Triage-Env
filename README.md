@@ -1,4 +1,13 @@
-<<<<<<< HEAD
+---
+title: Email Triage Env
+emoji: 📧
+colorFrom: blue
+colorTo: green
+sdk: docker
+pinned: false
+license: mit
+app_port: 7860
+---
 # Email Triage OpenEnv Environment
 
 An RL environment where an AI agent triages workplace emails by classifying,
