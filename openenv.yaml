@@ -1,0 +1,42 @@
+name: email_triage_env
+description: >
+  AI-driven email triage environment for benchmarking agent classification,
+  prioritization, and action selection on realistic workplace emails.
+
+actions:
+  - classify
+  - reply
+  - escalate
+  - ignore
+
+observation:
+  type: text
+  fields:
+    - email_id
+    - subject
+    - body
+    - sender
+    - step
+    - total_emails
+    - done
+    - reward
+    - task
+
+reward:
+  range: [0, 1]
+
+tasks:
+  - name: easy
+    emails: 3
+    description: Spam vs legitimate classification
+  - name: medium
+    emails: 5
+    description: Priority and action selection
+  - name: hard
+    emails: 10
+    description: Adversarial traps requiring body-level reasoning
+
+runtime:
+  max_steps_multiplier: 2
+  port: 7860
+  python: "3.10"
