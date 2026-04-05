@@ -19,8 +19,8 @@ def _require_env(key: str) -> str:
         sys.exit(1)
     return val
 
-BASE_URL  = _require_env("API_BASE_URL")
-MODEL_NAME = _require_env("MODEL_NAME")
+BASE_URL   = os.environ.get("API_BASE_URL", "https://api.groq.com/openai/v1")
+MODEL_NAME = os.environ.get("MODEL_NAME", "llama-3.3-70b-versatile")
 API_KEY   = _require_env("OPENAI_API_KEY")
 HF_TOKEN  = os.environ.get("HF_TOKEN", "")
 ENV_URL   = os.environ.get("ENV_URL", "http://localhost:7860")
