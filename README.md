@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Email Triage OpenEnv Environment
 
 An RL environment where an AI agent triages workplace emails by classifying,
@@ -231,3 +232,16 @@ email-triage-env/
 ├── easy.py         ← 3 emails + ground truth
 ├── medium.py       ← 5 emails + ground truth
 └── hard.py         ← 10 trap emails + ground truth
+=======
+---
+title: Email Triage Env
+emoji: 🏆
+colorFrom: gray
+colorTo: gray
+sdk: docker
+pinned: false
+license: mit
+---
+
+Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
+>>>>>>> bd3c7838ff04584a3bb78b2195ba8c1343d4c896
