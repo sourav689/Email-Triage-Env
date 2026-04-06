@@ -71,9 +71,44 @@ EMAILS = [
 ]
 
 GROUND_TRUTH = [
-    {"email_id": 1, "action_type": "reply",    "priority": "high",   "classification": "reply"},
-    {"email_id": 2, "action_type": "ignore",   "priority": "low",    "classification": "ignore"},
-    {"email_id": 3, "action_type": "escalate", "priority": "high",   "classification": "escalate"},
-    {"email_id": 4, "action_type": "classify", "priority": "medium", "classification": "classify"},
-    {"email_id": 5, "action_type": "ignore",   "priority": "low",    "classification": "ignore"},
+    {
+        "email_id":   1,
+        "action_type": "reply",
+        "priority":   "high",
+        "classification": "reply",
+        "trap_type":  "meeting_request",
+        "difficulty": 0.3,
+    },
+    {
+        "email_id":   2,
+        "action_type": "ignore",
+        "priority":   "low",
+        "classification": "ignore",
+        "trap_type":  "promotional_email",
+        "difficulty": 0.2,
+    },
+    {
+        "email_id":   3,
+        "action_type": "escalate",
+        "priority":   "high",
+        "classification": "escalate",
+        "trap_type":  "client_outage",
+        "difficulty": 0.3,
+    },
+    {
+        "email_id":   4,
+        "action_type": "classify",
+        "priority":   "medium",
+        "classification": "classify",
+        "trap_type":  "automated_alert",
+        "difficulty": 0.4,
+    },
+    {
+        "email_id":   5,
+        "action_type": "ignore",
+        "priority":   "low",
+        "classification": "ignore",
+        "trap_type":  "hr_announcement",
+        "difficulty": 0.2,
+    },
 ]

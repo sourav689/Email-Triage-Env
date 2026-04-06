@@ -15,139 +15,166 @@ tags:
 
 # Email Triage OpenEnv Environment
 
-An RL environment where an AI agent triages workplace emails by classifying,
-prioritizing, and taking appropriate actions. Built for the Meta PyTorch
-OpenEnv Hackathon 2025.
+A production-grade RL environment where an AI agent triages workplace emails
+by classifying, prioritizing, and taking appropriate actions. Features
+adversarial trap emails that defeat surface-level keyword matching, a
+forensic metrics system, and full OpenEnv spec compliance.
+
+Built for the Meta PyTorch OpenEnv Hackathon 2025.
 
 ---
 
 ## Problem Description
 
-Email overload is a real enterprise problem. Employees spend an average of
-2.5 hours per day on email. Poor triage leads to missed escalations, broken
-SLAs, and delayed decisions. This environment benchmarks AI agents on
-realistic email management workflows — including adversarial traps designed
-to fool surface-level classifiers.
+Email overload costs enterprises billions annually. Employees spend an average
+of 2.5 hours per day on email. Missed escalations break SLAs. Phishing emails
+disguised as executive requests cause wire fraud. Automated alerts marked
+CRITICAL that self-resolve waste engineering time.
+
+This environment benchmarks AI agents on exactly these failure modes — not
+toy classification tasks, but realistic adversarial workflows that require
+reading comprehension, sender domain analysis, and multi-turn context reasoning.
 
 ---
 
 ## Motivation
 
-Existing RL benchmarks use games and puzzles. Real enterprise value comes
-from agents that can handle ambiguous, high-stakes communication workflows.
-Email triage requires reading comprehension, sender domain analysis,
-priority reasoning, and context awareness across reply chains. This
-environment provides a structured, reproducible benchmark for exactly that.
+Every existing OpenEnv environment targets code execution, games, or web
+browsing. None address enterprise communication workflows. This environment
+fills that gap directly.
 
-Email triage is absent from the current OpenEnv environment catalog, which
-skews toward code execution, games, and web browsing. This environment fills
-a gap in enterprise communication workflows where agent reliability has
-immediate business value.
+Email triage is a task where agent reliability has immediate, measurable
+business value. A capable triage agent reduces human email processing time,
+catches phishing before escalation, and surfaces buried action items in long
+reply chains. Training and evaluating such agents requires a benchmark that
+models the full complexity of the task — not just spam vs. not-spam.
 
 ---
 
 ## Environment Design
 
-- **Type:** Reinforcement Learning environment (OpenEnv compliant)
-- **Interface:** HTTP REST API (FastAPI)
-- **Session model:** Episode-based with persistent state via episode_id
-- **Core loop:** reset() → observe email → step(action) → reward → repeat
+| Property | Value |
+|----------|-------|
+| Type | Reinforcement Learning (OpenEnv compliant) |
+| Interface | HTTP REST API via FastAPI |
+| Session model | Episode-based, persistent state via `episode_id` |
+| Port | 7860 |
+| Version | 2.0.0 |
 
-State persists across steps using an in-memory session registry keyed by
-episode_id. Each reset() creates a new episode with a unique UUID.
+**Core loop:**
+POST /reset?task=easy|medium|hard&seed=42
+→ episode_id + first email observation
+POST /step  { episode_id, action_type, priority, email_id }
+→ next observation + reward + running_score + trap metadata
+GET /metrics
+→ forensic breakdown: per-metric accuracy + trap_analysis array
+GET /state
+→ full session state with all actions taken
+
+State persists across HTTP requests using an in-memory session registry
+keyed by `episode_id`. Each `reset()` creates a new episode with a unique
+UUID. Seed support enables fully reproducible evaluation runs.
 
 ---
 
 ## Action Space
 
-| action_type | When to use |
-|-------------|-------------|
-| `classify`  | Email needs labelling but no immediate response |
-| `reply`     | Email requires a direct response from the agent |
-| `escalate`  | Email needs to be routed to a senior person urgently |
-| `ignore`    | Email is spam, irrelevant, or already handled |
+| `action_type` | When to use |
+|---------------|-------------|
+| `classify` | Email needs labelling but no immediate response |
+| `reply` | Email requires a direct response from the agent |
+| `escalate` | Email must be routed to senior staff urgently |
+| `ignore` | Email is spam, irrelevant, or already handled |
 
-| priority | Meaning |
-|----------|---------|
-| `high`   | Requires attention within hours |
+| `priority` | Meaning |
+|------------|---------|
+| `high` | Requires attention within hours |
 | `medium` | Requires attention within the day |
-| `low`    | No time pressure |
+| `low` | No time pressure |
 
 ---
 
 ## Observation Space
 
-Each observation is a JSON object with these fields:
+Each observation returned by `reset()` and `step()` is a JSON object:
 
-| Field          | Type   | Description                          |
-|----------------|--------|--------------------------------------|
-| `email_id`     | int    | Unique identifier for the email      |
-| `subject`      | string | Email subject line                   |
-| `body`         | string | Full email body text                 |
-| `sender`       | string | Sender email address                 |
-| `step`         | int    | Current step number in episode       |
-| `total_emails` | int    | Total emails in this task            |
-| `done`         | bool   | Whether the episode is complete      |
-| `reward`       | float  | Reward from the last action          |
-| `task`         | string | Current task name easy/medium/hard   |
+| Field | Type | Description |
+|-------|------|-------------|
+| `email_id` | int | Unique identifier for the email |
+| `subject` | string | Email subject line |
+| `body` | string | Full email body text |
+| `sender` | string | Sender email address |
+| `step` | int | Current step number in episode |
+| `total_emails` | int | Total emails in this task |
+| `done` | bool | Whether the episode is complete |
+| `reward` | float | Reward from the last action |
+| `task` | string | Current task name easy / medium / hard |
 
 ---
 
 ## Task Descriptions
 
-### Task 1 — Easy (3 emails)
+### Task 1 — Easy (3 emails, optimal steps: 3)
 
-Spam vs legitimate classification. Emails are unambiguous — obvious scam
-domains, clear internal senders, standard newsletters. Tests basic
-classification ability. Agent should score near-perfect here.
+Spam vs legitimate classification. All emails are unambiguous — obvious scam
+domains, clear internal senders, standard newsletters with unsubscribe links.
+Tests baseline classification ability. A capable agent should score above 0.90.
 
-### Task 2 — Medium (5 emails)
+### Task 2 — Medium (5 emails, optimal steps: 5)
 
-Priority and action selection. Emails require correct action_type AND
-priority assignment. Includes client escalations, automated alerts,
-meeting requests, and FYI announcements.
+Priority and action selection. Each email requires correct `action_type` AND
+`priority` assignment. Includes a client production outage requiring escalation,
+an automated PagerDuty warning-level alert, a meeting reschedule, a flash sale
+promotion, and an HR holiday notice.
 
-### Task 3 — Hard (10 emails)
+### Task 3 — Hard (10 emails, optimal steps: 10)
 
-Adversarial traps requiring body-level reasoning. Agent cannot rely on
-subject line alone.
+Adversarial traps requiring body-level reasoning. The agent cannot rely on
+subject line keywords alone. Each email is crafted to defeat a specific
+failure mode:
 
-- **Trap 1:** Misleading subject — URGENT server down subject but body is a newsletter
-- **Trap 2:** CEO phishing — external domain impersonating an executive requesting wire transfer
-- **Trap 3:** Conflicting priorities — two urgent emails, only one is from a real internal VIP
-- **Trap 4:** Buried request — actual ask hidden in paragraph 4 of a long reply chain
-- **Trap 5:** Friendly spam — warm personal tone from unknown external domain with suspicious link
-- **Trap 6:** Duplicate thread — only the follow-up email needs a reply, not the original
-- **Trap 7:** False alarm — CRITICAL alert in subject but body says auto-resolved, no action needed
-- **Trap 8:** Low priority CEO email — CEO sender but content is a company-wide holiday announcement
+| # | Trap Type | What makes it hard |
+|---|-----------|---------------------|
+| 1 | `misleading_subject` | Subject says URGENT server down — body is a DevOps newsletter |
+| 2 | `executive_phishing` | CEO requests wire transfer — sender is external domain |
+| 3 | `fake_urgency` | Vendor marks contract expiry as CRITICAL — it is an upsell |
+| 4 | `real_urgency` | Internal VP reports full infrastructure outage — all services down |
+| 5 | `buried_request` | Roadmap approval buried in paragraph 4 of a lunch reply chain |
+| 6 | `friendly_spam` | Personal warm tone — sender is unknown external domain with bit.ly link |
+| 7 | `duplicate_original` | First email in billing dispute thread — follow-up supersedes it |
+| 8 | `duplicate_followup` | Follow-up with Friday deadline — this is the one to reply to |
+| 9 | `false_alarm` | CRITICAL CPU spike in subject — body says auto-resolved in 2 minutes |
+| 10 | `low_priority_executive` | CEO sender — content is a Happy Holidays company announcement |
 
 ---
 
 ## Reward Logic
 
 ### Per-step reward components
-+0.4   correct action_type match
++0.4   correct action_type match (primary signal)
 +0.3   correct classification label match
 +0.2   correct priority match
 -0.2   wrong action_type
--0.1   wrong email_id
--0.05  per extra step beyond optimal step count
+-0.1   wrong email_id submitted
+-0.05  per extra step beyond optimal count
 
 ### Completion bonus
-+1.0   all emails processed successfully (done = True)
++1.0   awarded when done = True (all emails processed)
 
 ### Reward clamping
 
-All per-step rewards are clamped to the range [-1.0, +1.0] before accumulation.
+All per-step rewards are clamped to `[-1.0, +1.0]` before accumulation.
+The completion bonus is applied after clamping.
 
 ### Final score formula
-score = 0.4 x classification_accuracy
-+ 0.3 x action_accuracy
-+ 0.2 x priority_accuracy
-+ 0.1 x efficiency_score
-efficiency_score = max(0.0, 1.0 - 0.05 x max(0, steps_taken - optimal_steps))
+score = 0.4 × classification_accuracy
++ 0.3 × action_accuracy
++ 0.2 × priority_accuracy
++ 0.1 × efficiency_score
+efficiency_score = max(0.0, 1.0 − 0.05 × max(0, steps_taken − optimal_steps))
 
-Final score is always in range [0.0, 1.0]. Deterministic — same inputs always produce same output.
+Output is always in `[0.0, 1.0]`. Fully deterministic — identical inputs
+always produce identical outputs.
 
 ---
 
@@ -155,17 +182,98 @@ Final score is always in range [0.0, 1.0]. Deterministic — same inputs always 
 
 The reward function is designed to provide a rich training signal at every
 step rather than a sparse end-of-episode outcome. This allows agents to learn
-from partial correctness — for example, choosing the right action_type but
-wrong priority still earns +0.7 instead of 0.0.
+from partial correctness — choosing the right `action_type` but wrong
+`priority` earns `+0.7` rather than `0.0`.
 
-The efficiency penalty (-0.05 per extra step) discourages agents from taking
-redundant actions. The completion bonus (+1.0) creates a strong signal for
-finishing episodes cleanly. Together these shape an agent toward fast,
-accurate, and decisive triage behavior.
+The efficiency penalty (`-0.05` per extra step) discourages redundant actions.
+The completion bonus (`+1.0`) creates a strong terminal signal for clean
+episode finishes. Together, these shape agents toward fast, accurate, and
+decisive triage behavior.
 
 The hard task traps are specifically designed so that surface-level keyword
 matching fails. An agent must model sender domain legitimacy, body-subject
-mismatch, and conversational context to score above 0.8.
+mismatch, and conversational context to score above `0.80` on the hard task.
+
+---
+
+## API Reference
+
+### Standard OpenEnv Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/` | Health check |
+| GET | `/health` | Health check with uptime and session count |
+| POST | `/reset` | Start new episode |
+| POST | `/step` | Submit action, get next observation |
+| GET | `/state` | Full current session state |
+
+### Extended Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/tasks` | Discover all tasks with metadata and trap catalogue |
+| GET | `/metrics` | Forensic per-metric accuracy and trap analysis |
+| GET | `/docs` | Interactive Swagger UI |
+| GET | `/redoc` | ReDoc API documentation |
+
+### Reset parameters
+POST /reset?task=easy&seed=42
+POST /reset?task=medium&seed=42
+POST /reset?task=hard&seed=42
+
+`seed` defaults to `42`. Pass any integer for reproducible episodes.
+
+### Step request body
+```json
+{
+  "episode_id": "uuid-returned-by-reset",
+  "action_type": "escalate",
+  "priority": "high",
+  "email_id": 2
+}
+```
+
+### Metrics response (after episode completion)
+```json
+{
+  "classification_accuracy": 0.9,
+  "action_accuracy": 0.8,
+  "priority_accuracy": 0.85,
+  "efficiency_score": 1.0,
+  "final_score": 0.87,
+  "traps_caught_by_env": 2,
+  "trap_analysis": [
+    {
+      "email_id": 2,
+      "trap_type": "executive_phishing",
+      "difficulty": 0.95,
+      "agent_action": "reply",
+      "correct_action": "escalate",
+      "correct": false
+    }
+  ]
+}
+```
+
+---
+
+## Baseline Scores
+
+Measured using `llama-3.3-70b-versatile` via Groq API.
+`temperature=0` for full deterministic reproducibility.
+
+| Task | Score | Mistakes | Notes |
+|------|-------|----------|-------|
+| Easy | 0.77 | 1 | Wrong action_type on email 2 |
+| Medium | 0.96 | 1 partial | Wrong priority on email 1 |
+| Hard | 0.75 | 2 | Buried request + duplicate thread traps |
+
+Hard task score is deliberately lower. Two adversarial traps caught a
+frontier LLM — which is precisely what the environment is designed to do.
+
+Run `GET /metrics` after any episode to see the full trap-level breakdown
+of where the model succeeded and failed.
 
 ---
 
@@ -174,7 +282,9 @@ mismatch, and conversational context to score above 0.8.
 ### Requirements
 
 - Python 3.10 or higher
-- pip packages: fastapi, uvicorn, pydantic, openai, pyyaml, requests, openenv-core
+- Docker Desktop
+- Groq API key (free at console.groq.com) or OpenAI API key
+- Hugging Face account and token
 
 ### Install
 ```bash
@@ -185,11 +295,20 @@ pip install -r server/requirements.txt
 
 ### Environment Variables
 ```bash
+# Linux / Mac
 export API_BASE_URL="https://api.groq.com/openai/v1"
 export MODEL_NAME="llama-3.3-70b-versatile"
 export OPENAI_API_KEY="your_groq_api_key"
 export HF_TOKEN="your_hf_token"
 export ENV_URL="http://localhost:7860"
+```
+```cmd
+# Windows cmd
+set API_BASE_URL=https://api.groq.com/openai/v1
+set MODEL_NAME=llama-3.3-70b-versatile
+set OPENAI_API_KEY=your_groq_api_key
+set HF_TOKEN=your_hf_token
+set ENV_URL=http://localhost:7860
 ```
 
 ### Start the server
@@ -197,98 +316,75 @@ export ENV_URL="http://localhost:7860"
 PYTHONPATH=. uvicorn server.app:app --host 0.0.0.0 --port 7860
 ```
 
-### Test endpoints
+### Verify all endpoints
 ```bash
+# Health
 curl http://localhost:7860/health
 
-curl -X POST "http://localhost:7860/reset?task=easy"
+# Task discovery
+curl http://localhost:7860/tasks
 
+# Reset with seed
+curl -X POST "http://localhost:7860/reset?task=hard&seed=42"
+
+# Step (replace episode_id)
 curl -X POST http://localhost:7860/step \
   -H "Content-Type: application/json" \
-  -d '{"episode_id": "YOUR_EPISODE_ID", "action_type": "ignore", "priority": "low", "email_id": 1}'
+  -d '{"episode_id": "YOUR_ID", "action_type": "ignore", "priority": "low", "email_id": 1}'
 
+# Metrics
+curl http://localhost:7860/metrics
+
+# State
 curl http://localhost:7860/state
+
+# Interactive UI
+open http://localhost:7860/docs
 ```
 
 ---
 
 ## How to Run Inference
+```bash
+# Linux / Mac
+PYTHONPATH=. python inference.py
 
-### Windows
-```cmd
-set API_BASE_URL=https://api.groq.com/openai/v1
-set MODEL_NAME=llama-3.3-70b-versatile
-set OPENAI_API_KEY=your_groq_api_key
-set HF_TOKEN=your_hf_token
-set ENV_URL=http://localhost:7860
+# Windows
 set PYTHONPATH=.
 python inference.py
 ```
 
-### Linux and Mac
-```bash
-export API_BASE_URL="https://api.groq.com/openai/v1"
-export MODEL_NAME="llama-3.3-70b-versatile"
-export OPENAI_API_KEY="your_groq_api_key"
-export HF_TOKEN="your_hf_token"
-export ENV_URL="http://localhost:7860"
-PYTHONPATH=. python inference.py
-```
-
----
-
-## Baseline Scores
-
-Measured using llama-3.3-70b-versatile via Groq API with temperature=0 for full reproducibility.
-
-| Task   | Score | Notes                                        |
-|--------|-------|----------------------------------------------|
-| Easy   | 0.77  | 1 action_type mistake on email 2             |
-| Medium | 0.96  | 1 priority mistake on email 1                |
-| Hard   | 0.75  | 2 adversarial trap emails caught the model   |
-
-Hard task score is deliberately lower. The adversarial trap design is working as intended.
+Expected output format:
+[START]
+Task: easy
+[STEP]
+Action: {"action_type": "ignore", "priority": "low", "email_id": 1}
+Reward: 0.9000
+[END]
+Score: 0.77
+========================================
+FINAL RESULTS
+Easy: 0.77
+Medium: 0.96
+Hard: 0.75
 
 ---
 
 ## Docker
 ```bash
+# Build
 docker build -t email-triage-env .
+
+# Run
 docker run -p 7860:7860 email-triage-env
-```
 
-Open browser to http://localhost:7860/health to verify.
-
----
-
-## API Reference
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET    | /health  | Health check — returns status ok |
-| GET    | /        | Same as /health |
-| POST   | /reset   | Start new episode, returns episode_id and first observation |
-| POST   | /step    | Take action, returns observation reward done info |
-| GET    | /state   | Get full current session state |
-
-### Reset query parameter
-POST /reset?task=easy
-POST /reset?task=medium
-POST /reset?task=hard
-
-### Step request body
-```json
-{
-  "episode_id": "uuid-from-reset",
-  "action_type": "classify",
-  "priority": "high",
-  "email_id": 1
-}
+# Verify
+curl http://localhost:7860/health
 ```
 
 ---
 
-## Project Structure:
+## Project Structure
 email-triage-env/
 ├── inference.py          ← Baseline agent script (root level, mandatory)
 ├── grader.py             ← Final score calculator
@@ -300,23 +396,47 @@ email-triage-env/
 ├── Dockerfile
 │
 ├── server/
-│   ├── app.py            ← FastAPI server with session registry
-│   ├── environment.py    ← EmailTriageEnv class
+│   ├── app.py            ← FastAPI server — session registry, all endpoints
+│   ├── environment.py    ← EmailTriageEnv class with reward logic
 │   ├── requirements.txt  ← Server dependencies
 │   └── init.py
 │
 └── tasks/
-├── easy.py           ← 3 emails and ground truth
-├── medium.py         ← 5 emails and ground truth
-├── hard.py           ← 10 adversarial trap emails and ground truth
+├── easy.py           ← 3 emails + ground truth + trap metadata
+├── medium.py         ← 5 emails + ground truth + trap metadata
+├── hard.py           ← 10 adversarial trap emails + ground truth
 └── init.py
+
+---
+
+## Evaluation Metrics
+
+Use `GET /metrics` after any completed episode for a full forensic breakdown:
+
+| Metric | Weight | Description |
+|--------|--------|-------------|
+| Classification accuracy | 40% | action_type vs classification label |
+| Action accuracy | 30% | action_type vs ground truth |
+| Priority accuracy | 20% | priority vs ground truth |
+| Efficiency score | 10% | Penalty for steps beyond optimal |
+
+The `trap_analysis` array in the metrics response maps each email to its
+trap type, difficulty score, agent decision, correct decision, and whether
+the agent was caught. This gives complete forensic visibility into model
+behavior — especially valuable for hard task evaluation.
 
 ---
 
 ## Disqualification Checklist
 
-- Environment deploys and responds on HF Space
-- Not plagiarized — original email triage domain not present in existing OpenEnv catalog
-- Grader returns different scores per task — Easy 0.77, Medium 0.96, Hard 0.75
-- Baseline inference script at root level producing valid logs
+- Environment deploys and responds on HF Space — confirmed live
+- Original domain — email triage not present in existing OpenEnv catalog
+- Grader is non-constant — Easy 0.77, Medium 0.96, Hard 0.75
+- Baseline inference script at root — inference.py confirmed working
+- Docker builds and runs — confirmed in 96 seconds, no errors
+- All 4 required env vars present in inference.py
+- OpenAI client used for all LLM calls
+- Structured stdout logs follow START / STEP / END format exactly
+
+
 

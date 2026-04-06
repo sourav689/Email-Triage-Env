@@ -153,14 +153,84 @@ EMAILS = [
 ]
 
 GROUND_TRUTH = [
-    {"email_id": 1,  "action_type": "ignore",   "priority": "low",    "classification": "ignore"},    # Trap 1: misleading subject, body is newsletter
-    {"email_id": 2,  "action_type": "escalate", "priority": "high",   "classification": "escalate"},  # Trap 2: phishing as CEO, external domain
-    {"email_id": 3,  "action_type": "ignore",   "priority": "low",    "classification": "ignore"},    # Trap 3a: fake urgency, vendor upsell
-    {"email_id": 4,  "action_type": "escalate", "priority": "high",   "classification": "escalate"},  # Trap 3b: real urgency, internal VIP
-    {"email_id": 5,  "action_type": "reply",    "priority": "high",   "classification": "reply"},     # Trap 4: buried request in reply chain
-    {"email_id": 6,  "action_type": "ignore",   "priority": "low",    "classification": "ignore"},    # Trap 5: friendly spam from unknown domain
-    {"email_id": 7,  "action_type": "ignore",   "priority": "low",    "classification": "ignore"},    # Trap 6a: original thread, follow-up exists
-    {"email_id": 8,  "action_type": "reply",    "priority": "high",   "classification": "reply"},     # Trap 6b: follow-up is the actionable one
-    {"email_id": 9,  "action_type": "ignore",   "priority": "low",    "classification": "ignore"},    # Trap 7: CRITICAL in subject, auto-resolved
-    {"email_id": 10, "action_type": "classify", "priority": "low",    "classification": "classify"},  # Trap 8: CEO sender, low-priority content
+    {
+        "email_id":   1,
+        "action_type": "ignore",
+        "priority":   "low",
+        "classification": "ignore",
+        "trap_type":  "misleading_subject",
+        "difficulty": 0.9,
+    },
+    {
+        "email_id":   2,
+        "action_type": "escalate",
+        "priority":   "high",
+        "classification": "escalate",
+        "trap_type":  "executive_phishing",
+        "difficulty": 0.95,
+    },
+    {
+        "email_id":   3,
+        "action_type": "ignore",
+        "priority":   "low",
+        "classification": "ignore",
+        "trap_type":  "fake_urgency",
+        "difficulty": 0.8,
+    },
+    {
+        "email_id":   4,
+        "action_type": "escalate",
+        "priority":   "high",
+        "classification": "escalate",
+        "trap_type":  "real_urgency",
+        "difficulty": 0.7,
+    },
+    {
+        "email_id":   5,
+        "action_type": "reply",
+        "priority":   "high",
+        "classification": "reply",
+        "trap_type":  "buried_request",
+        "difficulty": 0.95,
+    },
+    {
+        "email_id":   6,
+        "action_type": "ignore",
+        "priority":   "low",
+        "classification": "ignore",
+        "trap_type":  "friendly_spam",
+        "difficulty": 0.85,
+    },
+    {
+        "email_id":   7,
+        "action_type": "ignore",
+        "priority":   "low",
+        "classification": "ignore",
+        "trap_type":  "duplicate_original",
+        "difficulty": 0.8,
+    },
+    {
+        "email_id":   8,
+        "action_type": "reply",
+        "priority":   "high",
+        "classification": "reply",
+        "trap_type":  "duplicate_followup",
+        "difficulty": 0.75,
+    },
+    {
+        "email_id":   9,
+        "action_type": "ignore",
+        "priority":   "low",
+        "classification": "ignore",
+        "trap_type":  "false_alarm",
+        "difficulty": 0.9,
+    },
+    {
+        "email_id":   10,
+        "action_type": "classify",
+        "priority":   "low",
+        "classification": "classify",
+        "trap_type":  "low_priority_executive",
+        "difficulty": 0.7,
+    },
 ]

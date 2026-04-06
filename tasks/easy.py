@@ -43,7 +43,28 @@ EMAILS = [
 ]
 
 GROUND_TRUTH = [
-    {"email_id": 1, "action_type": "ignore",   "priority": "low",    "classification": "ignore"},
-    {"email_id": 2, "action_type": "reply",    "priority": "high",   "classification": "reply"},
-    {"email_id": 3, "action_type": "ignore",   "priority": "low",    "classification": "ignore"},
+    {
+        "email_id":   1,
+        "action_type": "ignore",
+        "priority":   "low",
+        "classification": "ignore",
+        "trap_type":  "obvious_spam",
+        "difficulty": 0.1,
+    },
+    {
+        "email_id":   2,
+        "action_type": "reply",
+        "priority":   "high",
+        "classification": "reply",
+        "trap_type":  "legitimate_internal",
+        "difficulty": 0.1,
+    },
+    {
+        "email_id":   3,
+        "action_type": "ignore",
+        "priority":   "low",
+        "classification": "ignore",
+        "trap_type":  "obvious_newsletter",
+        "difficulty": 0.1,
+    },
 ]
