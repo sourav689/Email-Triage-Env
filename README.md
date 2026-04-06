@@ -5,8 +5,11 @@ colorFrom: blue
 colorTo: green
 sdk: docker
 pinned: false
-license: mit
-app_port: 7860
+tags:
+  - openenv
+  - reinforcement-learning
+  - email-triage
+  - rl-environment
 ---
 # Email Triage OpenEnv Environment
 
@@ -226,21 +229,26 @@ docker run -p 7860:7860 email-triage-env
 
 ## Project Structure
 email-triage-env/
-├── inference.py        ← Baseline agent script
-├── grader.py           ← Final score calculator
-├── models.py           ← Pydantic models
-├── client.py           ← EnvClient
-├── openenv.yaml        ← OpenEnv spec config
+├── inference.py          # Baseline agent script (root level, mandatory)
+├── grader.py             # Final score calculator
+├── models.py             # Pydantic action and observation models
+├── client.py             # EnvClient for external users
+├── openenv.yaml          # OpenEnv spec config
+├── pyproject.toml        # OpenEnv multi-mode deployment compliance
 ├── README.md
 ├── Dockerfile
+│
 ├── server/
-│   ├── app.py          ← FastAPI server
-│   ├── environment.py  ← EmailTriageEnv class
-│   └── requirements.txt
+│   ├── app.py            # FastAPI server with session registry
+│   ├── environment.py    # EmailTriageEnv class
+│   ├── requirements.txt  # Server dependencies
+│   └── __init__.py
+│
 └── tasks/
-├── easy.py         ← 3 emails + ground truth
-├── medium.py       ← 5 emails + ground truth
-└── hard.py         ← 10 trap emails + ground truth
+    ├── easy.py           # 3 emails and ground truth
+    ├── medium.py         # 5 emails and ground truth
+    ├── hard.py           # 10 adversarial trap emails and ground truth
+    └── __init__.py
 =======
 ---
 title: Email Triage Env
