@@ -258,6 +258,23 @@ POST /reset?task=hard&seed=42
 
 ---
 
+## Live Demo
+
+| Link | Description |
+|------|-------------|
+| [HF Space](https://huggingface.co/spaces/hugdevp/email-triage-env) | Space page — running status visible here |
+| [Interactive API](https://hugdevp-email-triage-env.hf.space/docs) | Swagger UI — try every endpoint in browser |
+| [Health Check](https://hugdevp-email-triage-env.hf.space/health) | Live server status and uptime |
+| [Task Discovery](https://hugdevp-email-triage-env.hf.space/tasks) | All tasks with trap catalogue |
+| [Metrics](https://hugdevp-email-triage-env.hf.space/metrics) | Forensic evaluation breakdown |
+
+The Swagger UI at `/docs` is the fastest way to explore the environment
+interactively — no code or curl needed. Call `POST /reset`, copy the
+`episode_id`, call `POST /step`, then `GET /metrics` to see the full
+trap-level forensic analysis in your browser.
+
+---
+
 ## Baseline Scores
 
 Measured using `llama-3.3-70b-versatile` via Groq API.
@@ -276,6 +293,7 @@ Run `GET /metrics` after any episode to see the full trap-level breakdown
 of where the model succeeded and failed.
 
 ---
+
 
 ## Setup Instructions
 
