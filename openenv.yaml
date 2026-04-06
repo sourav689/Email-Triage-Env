@@ -3,6 +3,9 @@ description: >
   AI-driven email triage environment for benchmarking agent classification,
   prioritization, and action selection on realistic workplace emails.
 
+license: mit
+author: hugdevp
+
 actions:
   - classify
   - reply
