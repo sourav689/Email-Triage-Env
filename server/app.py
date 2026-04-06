@@ -406,3 +406,11 @@ def metrics():
         "traps_caught_by_env":     traps_caught,
         "trap_analysis":           trap_analysis,
     }
+
+def main():
+    import uvicorn
+    # Replace 'app' with your FastAPI instance name if it's different
+    uvicorn.run("server.app:app", host="0.0.0.0", port=7860, reload=False)
+
+if __name__ == "__main__":
+    main()
