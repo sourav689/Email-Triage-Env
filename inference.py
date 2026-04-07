@@ -12,18 +12,13 @@ from tasks.hard import GROUND_TRUTH as HARD_GT
 GROUND_TRUTHS = {"easy": EASY_GT, "medium": MEDIUM_GT, "hard": HARD_GT}
 
 # ── env vars ──────────────────────────────────────────────────────────────────
-def _require_env(key: str) -> str:
-    val = os.environ.get(key)
-    if not val:
-        print(f"[ERROR] Required environment variable '{key}' is not set.", file=sys.stderr)
-        sys.exit(1)
-    return val
+
 
 BASE_URL   = os.environ.get("API_BASE_URL", "https://api.groq.com/openai/v1")
 MODEL_NAME = os.environ.get("MODEL_NAME", "llama-3.3-70b-versatile")
-API_KEY   = _require_env("OPENAI_API_KEY")
-HF_TOKEN  = os.environ.get("HF_TOKEN", "")
-ENV_URL   = os.environ.get("ENV_URL", "http://localhost:7860")
+API_KEY    = os.environ.get("OPENAI_API_KEY", "")
+HF_TOKEN   = os.environ.get("HF_TOKEN", "")
+ENV_URL    = os.environ.get("ENV_URL", "http://localhost:7860")
 
 client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
 
