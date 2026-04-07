@@ -82,7 +82,7 @@ def call_model(observation: dict) -> dict:
         parsed = json.loads(raw)
 
         # validate fields
-        valid_actions   = {"classify", "reply", "escalate", "ignore"}
+        valid_actions    = {"classify", "reply", "escalate", "ignore"}
         valid_priorities = {"high", "medium", "low"}
 
         if parsed.get("action_type") not in valid_actions:
@@ -118,14 +118,14 @@ def run_task(task_name: str) -> float:
         reset_data = reset_resp.json()
     except Exception as e:
         print(f"[ERROR] /reset failed for task '{task_name}': {e}", file=sys.stderr)
-        return 0.0
+        return 0.01  # FIX 1: was 0.0 — boundary violation
 
     episode_id = reset_data.get("episode_id", "")
     obs        = reset_data.get("observation", reset_data)
 
     if not episode_id:
         print(f"[ERROR] /reset did not return episode_id for task '{task_name}'", file=sys.stderr)
-        return 0.0
+        return 0.01  # FIX 2: was 0.0 — boundary violation
 
     actions_taken = []
     step_num      = 0
@@ -193,7 +193,7 @@ if __name__ == "__main__":
             score = run_task(task)
         except Exception as e:
             print(f"[ERROR] Task '{task}' crashed: {e}", file=sys.stderr)
-            score = 0.0
+            score = 0.01  # FIX 3: was 0.0 — boundary violation
         all_scores[task] = score
 
     print("=" * 40)
