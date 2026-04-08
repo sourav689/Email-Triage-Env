@@ -14,13 +14,13 @@ from tasks.hard import GROUND_TRUTH as HARD_GT
 
 GROUND_TRUTHS = {"easy": EASY_GT, "medium": MEDIUM_GT, "hard": HARD_GT}
 
-# ── env ───────────────────────────────────────────────────────────────────────
+# ── env ─────────────────────────────────────────────────────────────
 BASE_URL   = os.environ.get("API_BASE_URL", "https://api.groq.com/openai/v1")
 MODEL_NAME = os.environ.get("MODEL_NAME", "llama-3.3-70b-versatile")
 API_KEY    = os.environ.get("OPENAI_API_KEY") or os.environ.get("API_KEY", "")
 ENV_URL    = os.environ.get("ENV_URL", "http://localhost:7860")
 
-# ── client ────────────────────────────────────────────────────────────────────
+# ── client ──────────────────────────────────────────────────────────
 client = None
 if API_KEY:
     try:
@@ -28,142 +28,124 @@ if API_KEY:
     except Exception as e:
         print(f"[WARN] Client init failed: {e}", file=sys.stderr)
 else:
-    print("[INFO] Running in heuristic-only mode", file=sys.stderr)
+    print("[INFO] Heuristic-only mode", file=sys.stderr)
 
-
-# ── analyzer ──────────────────────────────────────────────────────────────────
-def analyze_email(obs: dict, history: list) -> dict:
+# ── analyzer ────────────────────────────────────────────────────────
+def analyze_email(obs, history):
     subject = (obs.get("subject") or "").lower()
     body    = (obs.get("body") or "").lower()
     sender  = (obs.get("sender") or "").lower()
 
-    content = body + " " + subject
+    content = subject + " " + body
 
     signals = {
-        "is_newsletter": False,
-        "is_phishing": False,
-        "urgency_type": "none",
-        "has_buried_ask": False,
-        "is_false_alarm": False,
-        "is_duplicate": False,
-        "sender_internal": "@yourcompany.com" in sender,
+        "newsletter": False,
+        "phishing": False,
+        "urgency": "none",
+        "false_alarm": False,
+        "duplicate": False,
+        "buried": False,
+        "internal": "@yourcompany.com" in sender,
+        "subject_body_mismatch": False,
     }
 
-    if any(x in body for x in [
-        "unsubscribe","opt out","preferences","privacy policy","marketing",
-        "view in browser","manage preferences"
-    ]):
-        signals["is_newsletter"] = True
+    # newsletter
+    if any(x in body for x in ["unsubscribe","opt out","preferences","marketing"]):
+        signals["newsletter"] = True
 
-    if not signals["sender_internal"]:
-        if any(x in subject+sender for x in ["ceo","cfo","director","urgent request","payment"]):
-            signals["is_phishing"] = True
-        if any(x in body for x in [
-            "wire transfer","bank account","urgent payment","invoice","payment",
-            "verify account","password reset","click link","login now"
+    # phishing (strong but not over-aggressive)
+    if not signals["internal"]:
+        if any(x in content for x in [
+            "wire transfer","bank","urgent payment","verify account",
+            "password reset","click link","login now"
         ]):
-            signals["is_phishing"] = True
+            signals["phishing"] = True
 
-    if any(x in content for x in [
-        "act now","claim","prize","reward","limited time","offer expires"
-    ]):
-        signals["urgency_type"] = "fake"
-    elif any(x in content for x in [
-        "outage","down","incident","breach","critical","sla","production"
-    ]):
-        signals["urgency_type"] = "real"
+    # urgency
+    if any(x in content for x in ["outage","down","incident","breach","critical"]):
+        signals["urgency"] = "real"
+    elif any(x in content for x in ["act now","offer","reward","prize"]):
+        signals["urgency"] = "fake"
 
-    if len(body) > 250 and any(x in body for x in [
-        "please","could you","can you","approval","review","action required"
-    ]):
-        signals["has_buried_ask"] = True
+    # false alarm
+    if "no action required" in body or "resolved" in body:
+        signals["false_alarm"] = True
 
-    if any(x in body for x in [
-        "no action required","auto-resolved","resolved automatically","self-resolved"
-    ]):
-        signals["is_false_alarm"] = True
+    # buried request
+    if len(body) > 250 and any(x in body for x in ["please","could you","approve","review"]):
+        signals["buried"] = True
 
-    for prev in history[-4:]:
-        if prev.get("sender") == sender:
-            prev_sub = (prev.get("subject") or "").lower()
-            if subject[:25] in prev_sub or prev_sub[:25] in subject:
-                signals["is_duplicate"] = True
+    # duplicate (improved)
+    for prev in history[-5:]:
+        ps = (prev.get("subject") or "").lower()
+        if sender == prev.get("sender"):
+            if subject[:30] in ps or ps[:30] in subject:
+                signals["duplicate"] = True
+
+    # subject-body mismatch (HARD task killer feature)
+    if "urgent" in subject and "newsletter" in body:
+        signals["subject_body_mismatch"] = True
 
     return signals
 
-
-# ── rule policy ───────────────────────────────────────────────────────────────
-def rule_policy(obs, signals):
-    eid = obs["email_id"]
-    subject = (obs.get("subject") or "").lower()
-
-    if signals["is_false_alarm"]:
-        return {"action_type": "ignore", "priority": "low", "email_id": eid}
-
-    if signals["is_phishing"]:
-        return {"action_type": "escalate", "priority": "high", "email_id": eid}
-
-    if signals["is_newsletter"] and not signals["has_buried_ask"]:
-        return {"action_type": "ignore", "priority": "low", "email_id": eid}
-
-    if signals["urgency_type"] == "real":
-        if any(x in subject for x in ["outage","down","critical","breach"]):
-            return {"action_type": "escalate", "priority": "high", "email_id": eid}
-        return {"action_type": "reply", "priority": "high", "email_id": eid}
-
-    if signals["has_buried_ask"]:
-        return {"action_type": "reply", "priority": "high", "email_id": eid}
-
-    if signals["is_duplicate"]:
-        return {"action_type": "classify", "priority": "low", "email_id": eid}
-
-    if signals["urgency_type"] == "fake":
-        return {"action_type": "classify", "priority": "low", "email_id": eid}
-
-    return None
-
-
-# ── fallback ──────────────────────────────────────────────────────────────────
-def fallback_policy(obs, signals):
+# ── confidence-based rule ───────────────────────────────────────────
+def rule_policy(obs, s):
     eid = obs["email_id"]
 
-    if signals["is_phishing"]:
-        return {"action_type": "escalate", "priority": "high", "email_id": eid}
+    # HIGH CONFIDENCE RULES
+    if s["false_alarm"]:
+        return {"action_type": "ignore", "priority": "low", "email_id": eid}, 0.95
 
-    if signals["urgency_type"] == "real":
-        return {"action_type": "reply", "priority": "high", "email_id": eid}
+    if s["phishing"]:
+        return {"action_type": "escalate", "priority": "high", "email_id": eid}, 0.9
 
-    if signals["is_newsletter"] or signals["is_false_alarm"]:
-        return {"action_type": "ignore", "priority": "low", "email_id": eid}
+    if s["newsletter"] and not s["buried"]:
+        return {"action_type": "ignore", "priority": "low", "email_id": eid}, 0.9
 
-    return random.choice([
-        {"action_type": "reply", "priority": "medium", "email_id": eid},
-        {"action_type": "classify", "priority": "medium", "email_id": eid},
-    ])
+    if s["urgency"] == "real":
+        if s["internal"]:
+            return {"action_type": "escalate", "priority": "high", "email_id": eid}, 0.85
+        return {"action_type": "reply", "priority": "high", "email_id": eid}, 0.8
 
+    # MEDIUM CONFIDENCE
+    if s["buried"]:
+        return {"action_type": "reply", "priority": "high", "email_id": eid}, 0.7
 
-def perturb(action):
-    if random.random() < 0.02:
-        action = action.copy()
-        action["action_type"] = "classify"
-        action["priority"] = "medium"
-    return action
+    if s["duplicate"]:
+        return {"action_type": "classify", "priority": "low", "email_id": eid}, 0.7
 
+    if s["urgency"] == "fake":
+        return {"action_type": "classify", "priority": "low", "email_id": eid}, 0.75
 
-# ── LLM call ──────────────────────────────────────────────────────────────────
+    # LOW confidence → let LLM decide
+    return None, 0.0
+
+# ── LLM ─────────────────────────────────────────────────────────────
 def call_model(obs, signals):
     if client is None:
         return None
 
     prompt = f"""
-Classify this email and return JSON only.
+You are an expert email triage agent.
 
+Email:
 From: {obs.get("sender")}
 Subject: {obs.get("subject")}
 Body: {obs.get("body")}
 
-Return:
-{{"action_type":"classify|reply|escalate|ignore","priority":"high|medium|low"}}
+Decide:
+- classify / reply / escalate / ignore
+- priority: high / medium / low
+
+Rules:
+- phishing → escalate high
+- real outage → escalate high
+- newsletters → ignore low
+- fake urgency → classify low
+- buried request → reply high
+
+Return ONLY JSON:
+{{"action_type":"...","priority":"..."}}
 """
 
     try:
@@ -191,27 +173,40 @@ Return:
     except Exception:
         return None
 
-
-# ── decision ──────────────────────────────────────────────────────────────────
+# ── decision engine (CORE IMPROVEMENT) ──────────────────────────────
 def decide(obs, history):
     signals = analyze_email(obs, history)
 
-    rule = rule_policy(obs, signals)
-    if rule:
-        return perturb(rule)
+    rule, confidence = rule_policy(obs, signals)
 
+    # HIGH confidence → trust rules
+    if rule and confidence >= 0.85:
+        return rule
+
+    # MEDIUM confidence → try LLM override
+    if confidence >= 0.6:
+        model_out = call_model(obs, signals)
+        if model_out:
+            return {
+                "action_type": model_out["action_type"],
+                "priority": model_out["priority"],
+                "email_id": obs["email_id"],
+            }
+        return rule
+
+    # LOW confidence → LLM first
     model_out = call_model(obs, signals)
     if model_out:
-        return perturb({
+        return {
             "action_type": model_out["action_type"],
             "priority": model_out["priority"],
             "email_id": obs["email_id"],
-        })
+        }
 
-    return perturb(fallback_policy(obs, signals))
+    # FINAL fallback (deterministic)
+    return {"action_type": "reply", "priority": "medium", "email_id": obs["email_id"]}
 
-
-# ── safe request ──────────────────────────────────────────────────────────────
+# ── safe request ────────────────────────────────────────────────────
 def safe_post(url, **kwargs):
     for i in range(2):
         try:
@@ -220,24 +215,19 @@ def safe_post(url, **kwargs):
             time.sleep(1 + i)
     raise RuntimeError(f"Request failed: {url}")
 
-
-# ── runner ────────────────────────────────────────────────────────────────────
+# ── runner with REQUIRED LOGS ───────────────────────────────────────
 def run_task(task):
+    print(f"[START] task={task}", flush=True)
+
     reset = safe_post(f"{ENV_URL}/reset", params={"task": task})
     eid = reset["episode_id"]
     obs = reset["observation"]
 
-    print(f"[START] task={task}", flush=True)
-
-    random.seed(hash(eid) % (2**32))
-
     history = []
     actions = []
+    step = 0
 
-    max_steps = obs.get("total_emails", 10) + 2
-    steps = 0
-
-    while not obs.get("done") and steps < max_steps:
+    while not obs.get("done"):
         action = decide(obs, history)
 
         resp = safe_post(f"{ENV_URL}/step", json={
@@ -247,29 +237,23 @@ def run_task(task):
 
         reward = resp.get("reward", 0.0)
 
-        print(
-            f"[STEP] step={steps+1} action={action} reward={round(reward,4)}",
-            flush=True
-        )
+        print(f"[STEP] step={step} action={action} reward={reward}", flush=True)
 
         history.append(obs)
         actions.append(action)
         obs = resp["observation"]
-        steps += 1
+        step += 1
 
     score = compute_final_score(actions, GROUND_TRUTHS[task])
-    score = max(1e-6, min(1 - 1e-6, score))
 
-    print(
-        f"[END] task={task} score={round(score,4)} steps={steps}",
-        flush=True
-    )
+    print(f"[END] task={task} score={score:.4f} steps={step}", flush=True)
 
+    return score
 
-# ── entry ─────────────────────────────────────────────────────────────────────
+# ── entry ──────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    for t in ["easy", "medium", "hard"]:
+    for t in ["easy","medium","hard"]:
         try:
             run_task(t)
         except Exception as e:
-            print(f"[END] task={t} error={str(e)} steps=0", flush=True)
+            print(f"[END] task={t} ERROR {e}", flush=True)
