@@ -286,3 +286,21 @@ def state():
         return {"message": "No active session"}
 
     return _SESSIONS[_ACTIVE_EPISODE_ID]
+
+def main():
+    import uvicorn
+
+    host = os.environ.get("HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT", 7860))
+
+    uvicorn.run(
+        "server.app:app",
+        host=host,
+        port=port,
+        reload=False,
+        workers=1,
+    )
+
+
+if __name__ == "__main__":
+    main()
