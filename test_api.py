@@ -1,68 +1,91 @@
 import requests
 import json
+import time
 
-BASE = "https://hugdevp-email-triage-env.hf.space"
+BASE = "http://localhost:7860"
 
-def main():
-    print("Testing live HF Space...")
+def assert_true(cond, msg):
+    if not cond:
+        raise Exception(f"[FAIL] {msg}")
 
-    # 1. Reset environment
-    r = requests.post(f"{BASE}/reset", params={"task": "easy"})
-    r.raise_for_status()
+def test_full_pipeline(task="hard"):
+    print(f"\n🚀 TESTING TASK: {task.upper()}")
+
+    # ─────────────────────────────────────────────
+    # 1. RESET
+    # ─────────────────────────────────────────────
+    r = requests.post(f"{BASE}/reset", params={"task": task})
+    assert_true(r.status_code == 200, "Reset failed")
+
     data = r.json()
-
-    episode_id = data["episode_id"]
+    eid = data["episode_id"]
     obs = data["observation"]
 
-    print(
-        "Reset OK — episode_id:",
-        episode_id[:8],
-        "... total_emails:",
-        obs["total_emails"],
-    )
+    assert_true("email_id" in obs, "Invalid observation")
+    print("✅ Reset OK")
 
-    # 2. Take a step
-    r2 = requests.post(
-        f"{BASE}/step",
-        json={
-            "episode_id": episode_id,
-            "action_type": "ignore",
+    steps = 0
+    max_steps = obs["total_emails"] + 2
+
+    # ─────────────────────────────────────────────
+    # 2. RUN FULL EPISODE (agent simulation)
+    # ─────────────────────────────────────────────
+    while not obs.get("done", False):
+
+        action = {
+            "episode_id": eid,
+            "action_type": "classify",
             "priority": "low",
-            "email_id": obs["email_id"],
-        },
-    )
-    r2.raise_for_status()
-    step_data = r2.json()
+            "email_id": obs["email_id"]
+        }
 
-    print(
-        "Step OK — reward:",
-        step_data["reward"],
-        "done:",
-        step_data["done"],
-    )
+        r = requests.post(f"{BASE}/step", json=action)
+        assert_true(r.status_code == 200, "Step failed")
 
-    # 3. Get state
-    r3 = requests.get(f"{BASE}/state")
-    r3.raise_for_status()
-    state = r3.json()
+        step_data = r.json()
 
-    print(
-        "State OK — current_index:",
-        state["current_index"],
-    )
+        # Validate structure
+        assert_true("reward" in step_data, "Missing reward")
+        assert_true("observation" in step_data, "Missing observation")
+        assert_true("done" in step_data, "Missing done flag")
 
-    # 4. Get metrics
-    r4 = requests.get(f"{BASE}/metrics")
-    r4.raise_for_status()
-    metrics = r4.json()
+        obs = step_data["observation"]
+        steps += 1
 
-    print(
-        "Metrics OK — final_score:",
-        metrics.get("final_score"),
-    )
+        # Guard infinite loops
+        assert_true(steps <= max_steps, "Exceeded max steps")
 
-    print("\nALL LIVE CHECKS PASSED")
+    print("✅ Episode completed")
+
+    # ─────────────────────────────────────────────
+    # 3. METRICS CHECK
+    # ─────────────────────────────────────────────
+    r = requests.get(f"{BASE}/metrics")
+    assert_true(r.status_code == 200, "Metrics failed")
+
+    metrics = r.json()
+
+    assert_true("final_score" in metrics, "Missing final_score")
+    assert_true(0 <= metrics["final_score"] <= 1, "Invalid score range")
+
+    print(f"✅ Final Score: {metrics['final_score']:.4f}")
+
+    # ─────────────────────────────────────────────
+    # 4. STATE CHECK
+    # ─────────────────────────────────────────────
+    r = requests.get(f"{BASE}/state")
+    assert_true(r.status_code == 200, "State failed")
+
+    state = r.json()
+    assert_true(state["done"] is True, "State mismatch")
+
+    print("✅ State consistent")
+
+    print("🎯 TEST PASSED\n")
 
 
 if __name__ == "__main__":
-    main()
+    for t in ["easy", "medium", "hard"]:
+        test_full_pipeline(t)
+
+    print("🔥 ALL TESTS PASSED — READY FOR SUBMISSION")
