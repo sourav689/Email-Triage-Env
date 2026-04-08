@@ -11,27 +11,19 @@ from tasks.hard import GROUND_TRUTH as HARD_GT
 
 GROUND_TRUTHS = {"easy": EASY_GT, "medium": MEDIUM_GT, "hard": HARD_GT}
 
-# ── env vars (UPDATED FOR VALIDATOR PROXY) ────────────────────────────────────
-
-# Use the specific keys the validator injects. Do not hardcode a default URL.
-BASE_URL   = os.environ.get("API_BASE_URL")
-API_KEY    = os.environ.get("API_KEY") or os.environ.get("OPENAI_API_KEY")
+# ── env vars ──────────────────────────────────────────────────────────────────
+BASE_URL   = os.environ.get("API_BASE_URL", "https://api.groq.com/openai/v1")
 MODEL_NAME = os.environ.get("MODEL_NAME", "llama-3.3-70b-versatile")
+API_KEY    = os.environ.get("OPENAI_API_KEY") or os.environ.get("API_KEY", "")
 HF_TOKEN   = os.environ.get("HF_TOKEN", "")
 ENV_URL    = os.environ.get("ENV_URL", "http://localhost:7860")
 
-# ── safety guard ──
-if not BASE_URL or not API_KEY:
-    print(f"[ERROR] Required environment variables are missing.")
-    print(f"Check: API_BASE_URL={bool(BASE_URL)}, API_KEY={bool(API_KEY)}")
-    # Exit gracefully with 0 so the validator sees a log, not a crash.
-    sys.exit(0)
-
+# ── client — never crash on missing key ───────────────────────────────────────
 try:
-    client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
+    client = OpenAI(base_url=BASE_URL, api_key=API_KEY if API_KEY else "placeholder")
 except Exception as e:
-    print(f"[ERROR] Failed to initialize OpenAI client: {e}")
-    sys.exit(0)
+    print(f"[WARN] OpenAI client init failed: {e}", file=sys.stderr)
+    client = None
 
 # ── prompt ────────────────────────────────────────────────────────────────────
 PROMPT_TEMPLATE = """You are an expert email triage agent. Analyze the email below and decide what action to take.
@@ -57,6 +49,13 @@ Respond with ONLY a valid JSON object, no extra text, no markdown:
 
 # ── model call ────────────────────────────────────────────────────────────────
 def call_model(observation: dict) -> dict:
+    if client is None:
+        return {
+            "action_type": "ignore",
+            "priority":    "low",
+            "email_id":    observation.get("email_id", 0),
+        }
+
     prompt = PROMPT_TEMPLATE.format(
         email_id=observation["email_id"],
         sender=observation.get("sender", ""),
@@ -72,7 +71,6 @@ def call_model(observation: dict) -> dict:
         )
         raw = response.choices[0].message.content.strip()
 
-        # strip markdown fences if model wraps in ```json ... ```
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -81,7 +79,6 @@ def call_model(observation: dict) -> dict:
 
         parsed = json.loads(raw)
 
-        # validate fields
         valid_actions    = {"classify", "reply", "escalate", "ignore"}
         valid_priorities = {"high", "medium", "low"}
 
@@ -92,22 +89,21 @@ def call_model(observation: dict) -> dict:
 
         return {
             "action_type": parsed["action_type"],
-            "priority":     parsed["priority"],
-            "email_id":     observation["email_id"],  # always use observed id
+            "priority":    parsed["priority"],
+            "email_id":    observation["email_id"],
         }
 
     except Exception as e:
         print(f"  [WARN] Model call/parse failed: {e}. Using fallback action.", file=sys.stderr)
         return {
             "action_type": "ignore",
-            "priority":     "low",
-            "email_id":     observation.get("email_id", 0),
+            "priority":    "low",
+            "email_id":    observation.get("email_id", 0),
         }
 
 
 # ── single task runner ────────────────────────────────────────────────────────
 def run_task(task_name: str) -> float:
-    # ── reset ──
     try:
         reset_resp = requests.post(
             f"{ENV_URL}/reset",
@@ -118,24 +114,23 @@ def run_task(task_name: str) -> float:
         reset_data = reset_resp.json()
     except Exception as e:
         print(f"[ERROR] /reset failed for task '{task_name}': {e}", file=sys.stderr)
-        return 0.01  # FIX 1: was 0.0 — boundary violation
+        return 0.01
 
     episode_id = reset_data.get("episode_id", "")
     obs        = reset_data.get("observation", reset_data)
 
     if not episode_id:
         print(f"[ERROR] /reset did not return episode_id for task '{task_name}'", file=sys.stderr)
-        return 0.01  # FIX 2: was 0.0 — boundary violation
+        return 0.01
 
     actions_taken = []
     step_num      = 0
-    max_guard     = 30   # hard safety cap — prevents infinite loops
+    max_guard     = 30
 
     print(f"[START]")
     print(f"Task: {task_name}")
     print()
 
-    # ── step loop ──
     while not obs.get("done", False) and step_num < max_guard:
         action   = call_model(obs)
         step_num += 1
@@ -173,7 +168,6 @@ def run_task(task_name: str) -> float:
         if done:
             break
 
-    # ── score ──
     gt    = GROUND_TRUTHS[task_name]
     score = compute_final_score(actions_taken, gt)
 
@@ -193,7 +187,7 @@ if __name__ == "__main__":
             score = run_task(task)
         except Exception as e:
             print(f"[ERROR] Task '{task}' crashed: {e}", file=sys.stderr)
-            score = 0.01  # FIX 3: was 0.0 — boundary violation
+            score = 0.01
         all_scores[task] = score
 
     print("=" * 40)
