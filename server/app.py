@@ -1,28 +1,32 @@
 import os
 import sys
 import time
+import threading
 from uuid import uuid4
-from typing import Optional
-from datetime import datetime
+from typing import Optional, Literal
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import Literal
 
 from tasks.easy import EMAILS as EASY_EMAILS, GROUND_TRUTH as EASY_GT
 from tasks.medium import EMAILS as MEDIUM_EMAILS, GROUND_TRUTH as MEDIUM_GT
 from tasks.hard import EMAILS as HARD_EMAILS, GROUND_TRUTH as HARD_GT
 from grader import compute_final_score
 
-# ── boot time for uptime tracking ─────────────────────────────────────────────
-_BOOT_TIME = time.time()
 
-# ── session registry ──────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# GLOBAL STATE
+# ──────────────────────────────────────────────────────────────────────────────
+_BOOT_TIME = time.time()
 _SESSIONS: dict = {}
 _ACTIVE_EPISODE_ID: str = ""
+_LOCK = threading.Lock()
+
+EPSILON = 1e-6
+MAX_SESSIONS = 500
 
 TASK_DATA = {
     "easy":   {"emails": EASY_EMAILS,   "ground_truth": EASY_GT},
@@ -30,7 +34,56 @@ TASK_DATA = {
     "hard":   {"emails": HARD_EMAILS,   "ground_truth": HARD_GT},
 }
 
-# ── request models ─────────────────────────────────────────────────────────────
+
+# ──────────────────────────────────────────────────────────────────────────────
+# NUMERIC STABILITY
+# ──────────────────────────────────────────────────────────────────────────────
+def _strict_clamp(x: float) -> float:
+    return max(EPSILON, min(1.0 - EPSILON, x))
+
+
+def _safe_score(x: float) -> float:
+    return _strict_clamp(round(x, 6))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SESSION MGMT
+# ──────────────────────────────────────────────────────────────────────────────
+def _cleanup_sessions():
+    if len(_SESSIONS) <= MAX_SESSIONS:
+        return
+
+    oldest = sorted(
+        _SESSIONS.items(),
+        key=lambda x: datetime.fromisoformat(x[1]["created_at"])
+    )[: len(_SESSIONS) - MAX_SESSIONS]
+
+    for k, _ in oldest:
+        del _SESSIONS[k]
+
+
+def _new_session(task: str, seed: int):
+    data = TASK_DATA[task]
+
+    return {
+        "task": task,
+        "seed": seed,
+        "emails": data["emails"],
+        "ground_truth": data["ground_truth"],
+        "current_index": 0,
+        "step_count": 0,
+        "actions_taken": [],
+        "total_reward": 0.0,
+        "last_reward": 0.0,
+        "done": False,
+        "episode_id": str(uuid4()),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# REQUEST MODEL
+# ──────────────────────────────────────────────────────────────────────────────
 class ActionRequest(BaseModel):
     episode_id: Optional[str] = None
     action: Optional[dict] = None
@@ -38,51 +91,59 @@ class ActionRequest(BaseModel):
     priority: Optional[Literal["high", "medium", "low"]] = None
     email_id: Optional[int] = None
 
-# ── helpers ────────────────────────────────────────────────────────────────────
-def _make_obs(session: dict) -> dict:
-    idx    = session["current_index"]
-    emails = session["emails"]
-    done   = session["done"]
 
-    if done or idx >= len(emails):
+# ──────────────────────────────────────────────────────────────────────────────
+# OBS
+# ──────────────────────────────────────────────────────────────────────────────
+def _make_obs(session):
+    idx = session["current_index"]
+    emails = session["emails"]
+
+    if session["done"] or idx >= len(emails):
         return {
-            "email_id":     -1,
-            "subject":      "[Episode Complete]",
-            "body":         "All emails have been processed.",
-            "sender":       "system",
-            "step":         session["step_count"],
+            "email_id": -1,
+            "subject": "[Episode Complete]",
+            "body": "All emails processed.",
+            "sender": "system",
+            "step": session["step_count"],
             "total_emails": len(emails),
-            "done":         True,
-            "reward":       0.0,
-            "task":         session["task"],
+            "done": True,
+            "reward": 0.0,
+            "task": session["task"],
         }
 
-    email = emails[idx]
+    e = emails[idx]
+
     return {
-        "email_id":     email["email_id"],
-        "subject":      email["subject"],
-        "body":         email["body"],
-        "sender":       email["sender"],
-        "step":         session["step_count"],
+        "email_id": e["email_id"],
+        "subject": e["subject"],
+        "body": e["body"],
+        "sender": e["sender"],
+        "step": session["step_count"],
         "total_emails": len(emails),
-        "done":         False,
-        "reward":       session.get("last_reward", 0.0),
-        "task":         session["task"],
+        "done": False,
+        "reward": session["last_reward"],
+        "task": session["task"],
     }
 
 
-def _compute_reward(action_type: str, priority: str, email_id: int, session: dict) -> float:
+# ──────────────────────────────────────────────────────────────────────────────
+# REWARD
+# ──────────────────────────────────────────────────────────────────────────────
+def _compute_reward(action_type, priority, email_id, session):
     idx = session["current_index"]
-    gt  = session["ground_truth"][idx]
+
+    if idx >= len(session["ground_truth"]):
+        return 0.0
+
+    gt = session["ground_truth"][idx]
+
     reward = 0.0
 
     if email_id != gt["email_id"]:
-        reward -= 0.1
+        reward -= 0.2
     else:
-        if action_type == gt["action_type"]:
-            reward += 0.4
-        else:
-            reward -= 0.2
+        reward += 0.4 if action_type == gt["action_type"] else -0.2
 
         if action_type == gt.get("classification", gt["action_type"]):
             reward += 0.3
@@ -90,327 +151,138 @@ def _compute_reward(action_type: str, priority: str, email_id: int, session: dic
         if priority == gt["priority"]:
             reward += 0.2
 
-    optimal    = len(session["emails"])
-    extra      = max(0, session["step_count"] - optimal)
-    reward    -= 0.05 * extra
+    optimal = len(session["emails"])
+    extra = max(0, session["step_count"] - optimal)
+    reward -= 0.05 * extra
 
-    return round(max(-1.0, min(1.0, reward)), 4)
-
-
-def _new_session(task: str, seed: int = 42) -> dict:
-    data = TASK_DATA[task]
-    return {
-        "task":           task,
-        "seed":           seed,
-        "emails":         data["emails"],
-        "ground_truth":   data["ground_truth"],
-        "current_index":  0,
-        "step_count":     0,
-        "actions_taken":  [],
-        "total_reward":   0.0,
-        "last_reward":    0.0,
-        "done":           False,
-        "episode_id":     str(uuid4()),
-        "created_at":     datetime.utcnow().isoformat() + "Z",
-    }
+    return round(max(-0.9999, min(0.9999, reward)), 4)
 
 
-# ── FastAPI app ────────────────────────────────────────────────────────────────
-app = FastAPI(
-    title="Email Triage OpenEnv",
-    description=(
-        "Production-grade RL environment for AI email triage. "
-        "Benchmarks agents on realistic workplace emails including adversarial traps. "
-        "Built for the Meta PyTorch OpenEnv Hackathon 2025."
-    ),
-    version="2.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
-)
+# ──────────────────────────────────────────────────────────────────────────────
+# FASTAPI
+# ──────────────────────────────────────────────────────────────────────────────
+app = FastAPI(title="Email Triage OpenEnv", version="3.0.0")
 
 
-# ── health ─────────────────────────────────────────────────────────────────────
-@app.get("/", tags=["System"])
-@app.get("/health", tags=["System"])
+@app.get("/")
+@app.get("/health")
 def health():
     return {
-        "status":        "ok",
-        "env":           "email_triage_env",
-        "version":       "2.0.0",
-        "uptime_seconds": round(time.time() - _BOOT_TIME, 2),
-        "active_sessions": len(_SESSIONS),
-        "tasks_available": list(TASK_DATA.keys()),
+        "status": "ok",
+        "uptime": round(time.time() - _BOOT_TIME, 2),
+        "sessions": len(_SESSIONS),
     }
 
 
-# ── task discovery ─────────────────────────────────────────────────────────────
-@app.get("/tasks", tags=["Environment"])
-def list_tasks():
-    """Discover all available tasks, their metadata and trap types."""
-    return {
-        "tasks": [
-            {
-                "name":          "easy",
-                "emails":        3,
-                "optimal_steps": 3,
-                "description":   "Spam vs legitimate classification. Unambiguous emails.",
-                "evaluation":    "classification accuracy only",
-            },
-            {
-                "name":          "medium",
-                "emails":        5,
-                "optimal_steps": 5,
-                "description":   "Priority and action selection on real workplace emails.",
-                "evaluation":    "classification + priority + action accuracy",
-            },
-            {
-                "name":          "hard",
-                "emails":        10,
-                "optimal_steps": 10,
-                "description":   "Adversarial traps requiring body-level reasoning.",
-                "evaluation":    "full pipeline scoring + efficiency penalty",
-                "traps": [
-                    "misleading_subject",
-                    "executive_phishing",
-                    "fake_urgency",
-                    "real_urgency",
-                    "buried_request",
-                    "friendly_spam",
-                    "duplicate_original",
-                    "duplicate_followup",
-                    "false_alarm",
-                    "low_priority_executive",
-                ],
-            },
-        ]
-    }
-
-
-# ── reset ──────────────────────────────────────────────────────────────────────
-@app.post("/reset", tags=["Environment"])
-def reset(
-    task: str = Query(default="easy", enum=["easy", "medium", "hard"]),
-    seed: int = Query(default=42, description="Seed for reproducibility"),
-):
-    """Start a new episode. Returns episode_id and first email observation."""
+@app.post("/reset")
+def reset(task: str = Query("easy"), seed: int = 42):
     global _ACTIVE_EPISODE_ID
 
     if task not in TASK_DATA:
-        raise HTTPException(status_code=400, detail=f"Unknown task '{task}'. Use: easy, medium, hard")
+        raise HTTPException(400, "Invalid task")
 
-    session = _new_session(task, seed)
-    _SESSIONS[session["episode_id"]] = session
-    _ACTIVE_EPISODE_ID = session["episode_id"]
+    with _LOCK:
+        _cleanup_sessions()
+        session = _new_session(task, seed)
+        _SESSIONS[session["episode_id"]] = session
+        _ACTIVE_EPISODE_ID = session["episode_id"]
 
-    obs = _make_obs(session)
     return {
-        "episode_id":   session["episode_id"],
-        "seed":         seed,
-        "observation":  obs,
-        "task":         task,
+        "episode_id": session["episode_id"],
+        "observation": _make_obs(session),
+        "task": task,
         "total_emails": len(session["emails"]),
-        "optimal_steps": len(session["emails"]),
     }
 
 
-# ── step ───────────────────────────────────────────────────────────────────────
-@app.post("/step", tags=["Environment"])
+@app.post("/step")
 def step(body: ActionRequest):
-    """Take one action. Returns next observation, reward, done flag, and live metrics."""
-    global _SESSIONS, _ACTIVE_EPISODE_ID
+    global _ACTIVE_EPISODE_ID
 
     episode_id = body.episode_id or _ACTIVE_EPISODE_ID
 
     if not episode_id or episode_id not in _SESSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"episode_id '{episode_id}' not found. Call /reset first.",
-        )
+        raise HTTPException(400, "Invalid episode_id")
 
-    session = _SESSIONS[episode_id]
+    with _LOCK:
+        session = _SESSIONS[episode_id]
 
-    if session["done"]:
-        return {
-            "observation": _make_obs(session),
-            "reward":      0.0,
-            "done":        True,
-            "info":        {"message": "Episode complete. Call /reset to start a new episode."},
-        }
+        if session["done"]:
+            return {"done": True, "reward": 0.0, "observation": _make_obs(session)}
 
-    # extract action — support flat and nested formats
-    if body.action:
-        action_type = body.action.get("action_type")
-        priority    = body.action.get("priority")
-        email_id    = body.action.get("email_id")
-    else:
-        action_type = body.action_type
-        priority    = body.priority
-        email_id    = body.email_id
+        action_type = body.action_type or (body.action or {}).get("action_type")
+        priority    = body.priority or (body.action or {}).get("priority")
+        email_id    = body.email_id or session["emails"][session["current_index"]]["email_id"]
 
-    # validate
-    valid_actions    = {"classify", "reply", "escalate", "ignore"}
-    valid_priorities = {"high", "medium", "low"}
+        if action_type not in {"classify","reply","escalate","ignore"}:
+            raise HTTPException(422, "Invalid action_type")
 
-    if action_type not in valid_actions:
-        raise HTTPException(status_code=422, detail=f"action_type must be one of {valid_actions}")
-    if priority not in valid_priorities:
-        raise HTTPException(status_code=422, detail=f"priority must be one of {valid_priorities}")
-    if email_id is None:
-        email_id = session["emails"][session["current_index"]]["email_id"]
+        if priority not in {"high","medium","low"}:
+            raise HTTPException(422, "Invalid priority")
 
-    # compute reward
-    reward = _compute_reward(action_type, priority, email_id, session)
+        reward = _compute_reward(action_type, priority, email_id, session)
 
-    # get ground truth for this step before advancing
-    gt = session["ground_truth"][session["current_index"]]
+        session["actions_taken"].append({
+            "email_id": email_id,
+            "action_type": action_type,
+            "priority": priority,
+            "reward": reward,
+        })
 
-    # record action with trap metadata
-    session["actions_taken"].append({
-        "email_id":    email_id,
-        "action_type": action_type,
-        "priority":    priority,
-        "reward":      reward,
-        "correct":     action_type == gt["action_type"],
-        "trap_type":   gt.get("trap_type", "none"),
-    })
+        session["total_reward"] = round(session["total_reward"] + reward, 4)
+        session["last_reward"]  = reward
+        session["step_count"]  += 1
+        session["current_index"] += 1
 
-    session["total_reward"] = round(session["total_reward"] + reward, 4)
-    session["last_reward"]  = reward
-    session["step_count"]  += 1
-    session["current_index"] += 1
+        max_steps = len(session["emails"]) + 2
 
-    # check termination
-    max_steps = len(session["emails"]) * 2
-    if session["current_index"] >= len(session["emails"]) or session["step_count"] >= max_steps:
-        session["done"] = True
-        reward = round(reward + 1.0, 4)  # completion bonus
+        if session["current_index"] >= len(session["emails"]) or session["step_count"] >= max_steps:
+            session["done"] = True
+            reward = round(min(0.9999, reward + 0.3), 4)
 
     obs = _make_obs(session)
 
-    # live running score
-    running_score = compute_final_score(
-        session["actions_taken"],
-        session["ground_truth"],
-    )
+    taken = session["actions_taken"][:len(session["ground_truth"])]
+    running_score = _safe_score(compute_final_score(taken, session["ground_truth"]))
 
     return {
-        "observation":   obs,
-        "reward":        reward,
-        "done":          session["done"],
+        "observation": obs,
+        "reward": reward,
+        "done": session["done"],
         "info": {
-            "episode_id":       episode_id,
-            "step":             session["step_count"],
-            "total_reward":     session["total_reward"],
-            "running_score":    running_score,
-            "emails_remaining": max(0, len(session["emails"]) - session["current_index"]),
+            "running_score": running_score,
+            "steps": session["step_count"],
+            "remaining": max(0, len(session["emails"]) - session["current_index"]),
         },
     }
 
 
-# ── state ──────────────────────────────────────────────────────────────────────
-@app.get("/state", tags=["Environment"])
-def state():
-    """Full current session state including all actions taken."""
-    if not _ACTIVE_EPISODE_ID or _ACTIVE_EPISODE_ID not in _SESSIONS:
-        return {"message": "No active episode. Call /reset first.", "sessions": len(_SESSIONS)}
-
-    session = _SESSIONS[_ACTIVE_EPISODE_ID]
-    return {
-        "episode_id":    _ACTIVE_EPISODE_ID,
-        "task":          session["task"],
-        "seed":          session["seed"],
-        "current_index": session["current_index"],
-        "total_emails":  len(session["emails"]),
-        "step_count":    session["step_count"],
-        "actions_taken": session["actions_taken"],
-        "total_reward":  session["total_reward"],
-        "done":          session["done"],
-        "created_at":    session["created_at"],
-    }
-
-
-# ── metrics ────────────────────────────────────────────────────────────────────
-@app.get("/metrics", tags=["Evaluation"])
+@app.get("/metrics")
 def metrics():
-    """
-    Per-metric accuracy breakdown for the current episode.
-    Includes trap-level forensic analysis for the hard task.
-    """
     if not _ACTIVE_EPISODE_ID or _ACTIVE_EPISODE_ID not in _SESSIONS:
-        return {"message": "No active episode. Call /reset first."}
+        return {"message": "No active episode"}
 
-    session = _SESSIONS[_ACTIVE_EPISODE_ID]
-    gt      = session["ground_truth"]
-    actions = session["actions_taken"]
-    n       = len(gt)
-    taken   = actions[:n]
+    s = _SESSIONS[_ACTIVE_EPISODE_ID]
+    gt = s["ground_truth"]
+    taken = s["actions_taken"][:len(gt)]
 
     if not taken:
-        return {
-            "episode_id": _ACTIVE_EPISODE_ID,
-            "task":       session["task"],
-            "message":    "No actions taken yet.",
-        }
+        return {"message": "No actions yet"}
 
-    classification_accuracy = round(sum(
-        1 for a, g in zip(taken, gt)
-        if a.get("action_type") == g.get("classification", g["action_type"])
-    ) / n, 4)
-
-    action_accuracy = round(sum(
-        1 for a, g in zip(taken, gt)
-        if a.get("action_type") == g["action_type"]
-    ) / n, 4)
-
-    priority_accuracy = round(sum(
-        1 for a, g in zip(taken, gt)
-        if a.get("priority") == g["priority"]
-    ) / n, 4)
-
-    optimal       = len(session["emails"])
-    steps_taken   = session["step_count"]
-    efficiency    = round(max(0.0, 1.0 - 0.05 * max(0, steps_taken - optimal)), 4)
-
-    final_score = compute_final_score(taken, gt)
-
-    trap_analysis = [
-        {
-            "email_id":   a.get("email_id"),
-            "trap_type":  g.get("trap_type", "none"),
-            "difficulty": g.get("difficulty", 0.5),
-            "agent_action":    a.get("action_type"),
-            "correct_action":  g["action_type"],
-            "agent_priority":  a.get("priority"),
-            "correct_priority": g["priority"],
-            "correct":    a.get("action_type") == g["action_type"],
-            "reward":     a.get("reward", 0.0),
-        }
-        for a, g in zip(taken, gt)
-    ]
-
-    traps_caught = sum(1 for t in trap_analysis if not t["correct"])
+    final_score = _safe_score(compute_final_score(taken, gt))
 
     return {
-        "episode_id":              _ACTIVE_EPISODE_ID,
-        "task":                    session["task"],
-        "steps_taken":             steps_taken,
-        "optimal_steps":           optimal,
-        "emails_processed":        len(taken),
-        "classification_accuracy": classification_accuracy,
-        "action_accuracy":         action_accuracy,
-        "priority_accuracy":       priority_accuracy,
-        "efficiency_score":        efficiency,
-        "final_score":             final_score,
-        "total_reward":            session["total_reward"],
-        "done":                    session["done"],
-        "traps_caught_by_env":     traps_caught,
-        "trap_analysis":           trap_analysis,
+        "final_score": final_score,
+        "steps": s["step_count"],
+        "emails": len(gt),
+        "done": s["done"],
+        "total_reward": s["total_reward"],
     }
 
-def main():
-    import uvicorn
-    # Replace 'app' with your FastAPI instance name if it's different
-    uvicorn.run("server.app:app", host="0.0.0.0", port=7860, reload=False)
 
-if __name__ == "__main__":
-    main()
+@app.get("/state")
+def state():
+    if not _ACTIVE_EPISODE_ID or _ACTIVE_EPISODE_ID not in _SESSIONS:
+        return {"message": "No active session"}
+
+    return _SESSIONS[_ACTIVE_EPISODE_ID]

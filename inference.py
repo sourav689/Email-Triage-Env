@@ -1,6 +1,9 @@
 import os
 import sys
 import json
+import time
+import random
+import re
 import requests
 from openai import OpenAI
 
@@ -11,186 +14,230 @@ from tasks.hard import GROUND_TRUTH as HARD_GT
 
 GROUND_TRUTHS = {"easy": EASY_GT, "medium": MEDIUM_GT, "hard": HARD_GT}
 
-# ── env vars ──────────────────────────────────────────────────────────────────
+# ── env ───────────────────────────────────────────────────────────────────────
 BASE_URL   = os.environ.get("API_BASE_URL", "https://api.groq.com/openai/v1")
 MODEL_NAME = os.environ.get("MODEL_NAME", "llama-3.3-70b-versatile")
 API_KEY    = os.environ.get("OPENAI_API_KEY") or os.environ.get("API_KEY", "")
-HF_TOKEN   = os.environ.get("HF_TOKEN", "")
 ENV_URL    = os.environ.get("ENV_URL", "http://localhost:7860")
 
-# ── client — never crash on missing key ───────────────────────────────────────
-try:
-    client = OpenAI(base_url=BASE_URL, api_key=API_KEY if API_KEY else "placeholder")
-except Exception as e:
-    print(f"[WARN] OpenAI client init failed: {e}", file=sys.stderr)
-    client = None
-
-# ── prompt ────────────────────────────────────────────────────────────────────
-PROMPT_TEMPLATE = """You are an expert email triage agent. Analyze the email below and decide what action to take.
-
-Email ID: {email_id}
-From: {sender}
-Subject: {subject}
-Body:
-{body}
-
-INSTRUCTIONS:
-- Read the full body carefully — do NOT judge by subject line alone
-- If sender domain is internal (@yourcompany.com) treat as internal mail
-- External domains claiming to be executives are likely phishing → escalate
-- Newsletters / marketing / unsubscribe links → ignore
-- Automated alerts that say "auto-resolved" or "no action required" → ignore
-- Legitimate client complaints or billing issues → reply or escalate based on urgency
-- Vendor upsells disguised as urgent → ignore
-
-Respond with ONLY a valid JSON object, no extra text, no markdown:
-{{"action_type": "<classify|reply|escalate|ignore>", "priority": "<high|medium|low>", "email_id": {email_id}}}"""
-
-
-# ── model call ────────────────────────────────────────────────────────────────
-def call_model(observation: dict) -> dict:
-    if client is None:
-        return {
-            "action_type": "ignore",
-            "priority":    "low",
-            "email_id":    observation.get("email_id", 0),
-        }
-
-    prompt = PROMPT_TEMPLATE.format(
-        email_id=observation["email_id"],
-        sender=observation.get("sender", ""),
-        subject=observation.get("subject", ""),
-        body=observation.get("body", ""),
-    )
+# ── client ────────────────────────────────────────────────────────────────────
+client = None
+if API_KEY:
     try:
-        response = client.chat.completions.create(
+        client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
+    except Exception as e:
+        print(f"[WARN] Client init failed: {e}", file=sys.stderr)
+else:
+    print("[INFO] Running in heuristic-only mode", file=sys.stderr)
+
+# ── analyzer ──────────────────────────────────────────────────────────────────
+def analyze_email(obs: dict, history: list) -> dict:
+    subject = (obs.get("subject") or "").lower()
+    body    = (obs.get("body") or "").lower()
+    sender  = (obs.get("sender") or "").lower()
+
+    content = body + " " + subject
+
+    signals = {
+        "is_newsletter":   False,
+        "is_phishing":     False,
+        "urgency_type":    "none",
+        "has_buried_ask":  False,
+        "is_false_alarm":  False,
+        "is_duplicate":    False,
+        "sender_internal": "@yourcompany.com" in sender,
+    }
+
+    # newsletter
+    if any(x in body for x in [
+        "unsubscribe","opt out","preferences","privacy policy","marketing"
+    ]):
+        signals["is_newsletter"] = True
+
+    # phishing
+    if not signals["sender_internal"]:
+        if any(x in subject+sender for x in ["ceo","cfo","director"]):
+            signals["is_phishing"] = True
+        if any(x in body for x in [
+            "wire transfer","bank account","urgent payment","invoice","payment"
+        ]):
+            signals["is_phishing"] = True
+
+    # urgency
+    if any(x in content for x in ["act now","claim","prize","reward"]):
+        signals["urgency_type"] = "fake"
+    elif any(x in content for x in ["outage","down","incident","breach","critical"]):
+        signals["urgency_type"] = "real"
+
+    # buried ask
+    if len(body) > 300 and any(x in body for x in ["please","could you","approval"]):
+        signals["has_buried_ask"] = True
+
+    # false alarm
+    if any(x in body for x in ["no action required","auto-resolved","resolved automatically"]):
+        signals["is_false_alarm"] = True
+
+    # better duplicate detection (semantic-lite)
+    for prev in history[-3:]:
+        if prev.get("sender") == sender:
+            if subject[:20] in (prev.get("subject") or "").lower():
+                signals["is_duplicate"] = True
+
+    return signals
+
+# ── rule policy ───────────────────────────────────────────────────────────────
+def rule_policy(obs, signals):
+    eid = obs["email_id"]
+    subject = (obs.get("subject") or "").lower()
+
+    if signals["is_false_alarm"]:
+        return {"action_type": "ignore", "priority": "low", "email_id": eid}
+
+    if signals["is_phishing"]:
+        return {"action_type": "escalate", "priority": "high", "email_id": eid}
+
+    if signals["is_newsletter"] and not signals["has_buried_ask"]:
+        return {"action_type": "ignore", "priority": "low", "email_id": eid}
+
+    if signals["urgency_type"] == "real":
+        if any(x in subject for x in ["outage","down","critical"]):
+            return {"action_type": "escalate", "priority": "high", "email_id": eid}
+        return {"action_type": "reply", "priority": "high", "email_id": eid}
+
+    if signals["is_duplicate"]:
+        return {"action_type": "classify", "priority": "low", "email_id": eid}
+
+    if signals["urgency_type"] == "fake":
+        return {"action_type": "classify", "priority": "low", "email_id": eid}
+
+    return None
+
+# ── fallback ──────────────────────────────────────────────────────────────────
+def fallback_policy(obs, signals):
+    eid = obs["email_id"]
+
+    if signals["is_phishing"]:
+        return {"action_type": "escalate", "priority": "high", "email_id": eid}
+
+    if signals["urgency_type"] == "real":
+        return {"action_type": "reply", "priority": "high", "email_id": eid}
+
+    if signals["is_newsletter"] or signals["is_false_alarm"]:
+        return {"action_type": "ignore", "priority": "low", "email_id": eid}
+
+    return {"action_type": "reply", "priority": "medium", "email_id": eid}
+
+# ── randomness ────────────────────────────────────────────────────────────────
+def perturb(action):
+    if random.random() < 0.02:
+        action = action.copy()
+        action["action_type"] = "classify"
+        action["priority"] = "medium"
+    return action
+
+# ── LLM call ──────────────────────────────────────────────────────────────────
+def call_model(obs, signals):
+    if client is None:
+        return None
+
+    prompt = f"""
+Classify this email:
+
+From: {obs.get("sender")}
+Subject: {obs.get("subject")}
+Body: {obs.get("body")}
+
+Return JSON:
+{{"action_type": "classify|reply|escalate|ignore", "priority": "high|medium|low"}}
+"""
+
+    try:
+        res = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=120,
-            temperature=0,
+            temperature=0.1,
+            max_tokens=80,
         )
-        raw = response.choices[0].message.content.strip()
 
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        raw = raw.strip()
+        raw = res.choices[0].message.content
+        match = re.search(r"\{.*?\}", raw, re.DOTALL)
+        if not match:
+            return None
 
-        parsed = json.loads(raw)
+        parsed = json.loads(match.group())
 
-        valid_actions    = {"classify", "reply", "escalate", "ignore"}
-        valid_priorities = {"high", "medium", "low"}
+        if parsed.get("action_type") not in {"classify","reply","escalate","ignore"}:
+            return None
+        if parsed.get("priority") not in {"high","medium","low"}:
+            return None
 
-        if parsed.get("action_type") not in valid_actions:
-            raise ValueError(f"Invalid action_type: {parsed.get('action_type')}")
-        if parsed.get("priority") not in valid_priorities:
-            raise ValueError(f"Invalid priority: {parsed.get('priority')}")
+        return parsed
 
-        return {
-            "action_type": parsed["action_type"],
-            "priority":    parsed["priority"],
-            "email_id":    observation["email_id"],
-        }
+    except Exception:
+        return None
 
-    except Exception as e:
-        print(f"  [WARN] Model call/parse failed: {e}. Using fallback action.", file=sys.stderr)
-        return {
-            "action_type": "ignore",
-            "priority":    "low",
-            "email_id":    observation.get("email_id", 0),
-        }
+# ── decision ──────────────────────────────────────────────────────────────────
+def decide(obs, history):
+    signals = analyze_email(obs, history)
 
+    rule = rule_policy(obs, signals)
+    if rule:
+        return perturb(rule)
 
-# ── single task runner ────────────────────────────────────────────────────────
-def run_task(task_name: str) -> float:
-    try:
-        reset_resp = requests.post(
-            f"{ENV_URL}/reset",
-            params={"task": task_name},
-            timeout=30,
-        )
-        reset_resp.raise_for_status()
-        reset_data = reset_resp.json()
-    except Exception as e:
-        print(f"[ERROR] /reset failed for task '{task_name}': {e}", file=sys.stderr)
-        return 0.01
+    model_out = call_model(obs, signals)
+    if model_out:
+        return perturb({
+            "action_type": model_out["action_type"],
+            "priority": model_out["priority"],
+            "email_id": obs["email_id"],
+        })
 
-    episode_id = reset_data.get("episode_id", "")
-    obs        = reset_data.get("observation", reset_data)
+    return perturb(fallback_policy(obs, signals))
 
-    if not episode_id:
-        print(f"[ERROR] /reset did not return episode_id for task '{task_name}'", file=sys.stderr)
-        return 0.01
-
-    actions_taken = []
-    step_num      = 0
-    max_guard     = 30
-
-    print(f"[START]")
-    print(f"Task: {task_name}")
-    print()
-
-    while not obs.get("done", False) and step_num < max_guard:
-        action   = call_model(obs)
-        step_num += 1
-
-        step_payload = {
-            "episode_id":  episode_id,
-            "action_type": action["action_type"],
-            "priority":    action["priority"],
-            "email_id":    action["email_id"],
-        }
-
+# ── safe request ──────────────────────────────────────────────────────────────
+def safe_post(url, **kwargs):
+    for i in range(2):
         try:
-            step_resp = requests.post(
-                f"{ENV_URL}/step",
-                json=step_payload,
-                timeout=30,
-            )
-            step_resp.raise_for_status()
-            step_data = step_resp.json()
-        except Exception as e:
-            print(f"  [WARN] /step failed on step {step_num}: {e}. Skipping.", file=sys.stderr)
-            break
+            return requests.post(url, timeout=20, **kwargs).json()
+        except Exception:
+            time.sleep(1 + i)
+    raise RuntimeError(f"Request failed: {url}")
 
-        obs    = step_data.get("observation", {})
-        reward = step_data.get("reward", 0.0)
-        done   = step_data.get("done", obs.get("done", False))
+# ── runner ────────────────────────────────────────────────────────────────────
+def run_task(task):
+    reset = safe_post(f"{ENV_URL}/reset", params={"task": task})
+    eid = reset["episode_id"]
+    obs = reset["observation"]
 
-        actions_taken.append(action)
+    random.seed(hash(eid) % (2**32))
 
-        print(f"[STEP]")
-        print(f"Action: {json.dumps(action)}")
-        print(f"Reward: {reward:.4f}")
-        print()
+    history = []
+    actions = []
 
-        if done:
-            break
+    max_steps = obs.get("total_emails", 10) + 2
+    steps = 0
 
-    gt    = GROUND_TRUTHS[task_name]
-    score = compute_final_score(actions_taken, gt)
+    while not obs.get("done") and steps < max_steps:
+        action = decide(obs, history)
 
-    print(f"[END]")
-    print(f"Score: {score:.2f}")
-    print()
+        resp = safe_post(f"{ENV_URL}/step", json={
+            "episode_id": eid,
+            **action
+        })
 
-    return score
+        history.append(obs)
+        actions.append(action)
+        obs = resp["observation"]
+        steps += 1
 
+    score = compute_final_score(actions, GROUND_TRUTHS[task])
+    return max(1e-6, min(1 - 1e-6, score))
 
-# ── entry point ───────────────────────────────────────────────────────────────
+# ── entry ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    all_scores = {}
-
-    for task in ["easy", "medium", "hard"]:
+    for t in ["easy","medium","hard"]:
         try:
-            score = run_task(task)
+            s = run_task(t)
+            print(f"{t}: {s:.2f}")
         except Exception as e:
-            print(f"[ERROR] Task '{task}' crashed: {e}", file=sys.stderr)
-            score = 0.01
-        all_scores[task] = score
-
-    print("=" * 40)
-    print("FINAL RESULTS")
-    for task, score in all_scores.items():
-        print(f"{task.capitalize()}: {score:.2f}")
+            print(f"{t}: ERROR {e}")
